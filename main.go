@@ -130,7 +130,7 @@ func sendMail(relay Relay, req SendRequest) error {
 		c.StartTLS(&tls.Config{ServerName: relay.Host, InsecureSkipVerify: true})
 	}
 
-	auth := loginAuth{username: relay.From, password: relay.Password}
+	auth := unencryptedAuth{smtp.PlainAuth("", relay.From, relay.Password, relay.Host)}
 	if err := c.Auth(auth); err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}

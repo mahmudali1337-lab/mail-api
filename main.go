@@ -79,6 +79,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+type unencryptedAuth struct {
+	smtp.Auth
+}
+
+func (a unencryptedAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	s := *server
+	s.TLS = true
+	return a.Auth.Start(&s)
+}
+
 func sendMail(relay Relay, req SendRequest) error {
 	addr := fmt.Sprintf("%s:%d", relay.Host, relay.Port)
 
@@ -95,10 +105,11 @@ func sendMail(relay Relay, req SendRequest) error {
 	defer c.Close()
 
 	if ok, _ := c.Extension("STARTTLS"); ok {
-		c.StartTLS(&tls.Config{ServerName: relay.Host, MinVersion: tls.VersionTLS12})
+		c.StartTLS(&tls.Config{ServerName: relay.Host, InsecureSkipVerify: true})
 	}
 
-	if err := c.Auth(smtp.PlainAuth("", relay.From, relay.Password, relay.Host)); err != nil {
+	auth := smtp.PlainAuth("", relay.From, relay.Password, relay.Host)
+	if err := c.Auth(unencryptedAuth{auth}); err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
 

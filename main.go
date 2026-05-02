@@ -113,12 +113,14 @@ func (a loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 
 func sendMail(relay Relay, req SendRequest) error {
 	addr := fmt.Sprintf("%s:%d", relay.Host, relay.Port)
+	log.Printf("[send] connecting to relay %s", addr)
 
 	dialer := &net.Dialer{Timeout: 15 * time.Second}
 	conn, err := dialer.Dial("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
+	log.Printf("[send] connected to %s", addr)
 
 	c, err := smtp.NewClient(conn, relay.Host)
 	if err != nil {
@@ -127,18 +129,28 @@ func sendMail(relay Relay, req SendRequest) error {
 	defer c.Close()
 
 	if ok, _ := c.Extension("STARTTLS"); ok {
-		c.StartTLS(&tls.Config{ServerName: relay.Host, InsecureSkipVerify: true})
+		log.Printf("[send] starting TLS with %s", relay.Host)
+		if err := c.StartTLS(&tls.Config{ServerName: relay.Host, InsecureSkipVerify: true}); err != nil {
+			log.Printf("[send] STARTTLS failed (continuing): %v", err)
+		} else {
+			log.Printf("[send] TLS established")
+		}
+	} else {
+		log.Printf("[send] STARTTLS not advertised, continuing plain")
 	}
 
+	log.Printf("[send] authenticating as %s", relay.From)
 	auth := unencryptedAuth{smtp.PlainAuth("", relay.From, relay.Password, relay.Host)}
 	if err := c.Auth(auth); err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
+	log.Printf("[send] authenticated")
 
 	if err := c.Mail(relay.From); err != nil {
 		return fmt.Errorf("mail from: %w", err)
 	}
 	for _, to := range req.To {
+		log.Printf("[send] RCPT TO: %s", to)
 		if err := c.Rcpt(to); err != nil {
 			return fmt.Errorf("rcpt %s: %w", to, err)
 		}
@@ -172,36 +184,47 @@ func sendMail(relay Relay, req SendRequest) error {
 	wc.Write([]byte(headers))
 	wc.Write([]byte(req.Body))
 	wc.Close()
-	return c.Quit()
+
+	if err := c.Quit(); err != nil {
+		log.Printf("[send] QUIT error (ignored): %v", err)
+	}
+	log.Printf("[send] message accepted by relay %s, msgID=%s", relay.Host, msgID)
+	return nil
 }
 
 func handleSend(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		log.Printf("[api] 405 method not allowed: %s", r.Method)
 		writeJSON(w, http.StatusMethodNotAllowed, SendResponse{OK: false, Error: "method not allowed"})
 		return
 	}
 
 	var req SendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("[api] bad json: %v", err)
 		writeJSON(w, http.StatusBadRequest, SendResponse{OK: false, Error: "invalid json"})
 		return
 	}
 	if len(req.To) == 0 {
+		log.Printf("[api] missing 'to' field")
 		writeJSON(w, http.StatusBadRequest, SendResponse{OK: false, Error: "to is required"})
 		return
 	}
 	if req.Subject == "" {
+		log.Printf("[api] missing 'subject' field")
 		writeJSON(w, http.StatusBadRequest, SendResponse{OK: false, Error: "subject is required"})
 		return
 	}
 
 	relay := nextRelay()
+	log.Printf("[api] sending to=%v subject=%q via relay=%s", req.To, req.Subject, relay.Host)
 	if err := sendMail(relay, req); err != nil {
-		log.Printf("send error via %s: %v", relay.Host, err)
+		log.Printf("[api] FAILED to=%v via=%s err=%v", req.To, relay.Host, err)
 		writeJSON(w, http.StatusBadGateway, SendResponse{OK: false, Error: err.Error()})
 		return
 	}
 
+	log.Printf("[api] OK to=%v via=%s", req.To, relay.Host)
 	writeJSON(w, http.StatusOK, SendResponse{OK: true, Relay: relay.Host})
 }
 
